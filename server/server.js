@@ -9,10 +9,24 @@ const { createProxyMiddleware } = require("http-proxy-middleware");
 const QueryStream = require("pg-query-stream");
 require("dotenv").config();
 const pool = require("./db");
+const { createEvilCatalog, ensureReady } = require("./evilCatalog");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// With EVIL_UPLOAD_URL set, EVIL's recording catalog is the source of truth and CAT's database is a
+// lazily-built cache of it (see evilCatalog.js). Without it CAT works exactly as it always did.
+const evil = createEvilCatalog();
+const legacyUploadAllowed = !evil.enabled || process.env.CAT_LEGACY_UPLOAD === "1";
+const evilUiUrl = process.env.EVIL_UI_URL || "EVIL-UI";
+const retiredUpload = (req, res, next) => {
+  if (legacyUploadAllowed) return next();
+  return res.status(410).json({
+    error: "Uploads moved to EVIL",
+    message: `Upload recordings in ${evilUiUrl}; they appear here automatically.`,
+  });
+};
 
 const DEFAULT_ROS_MESSAGE_LIMIT = parseInt(
   process.env.ROS_MESSAGE_LIMIT || "500",
@@ -59,7 +73,7 @@ const timestampSuffix = () => {
   )}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 };
 
-app.post("/upload-folder", upload.array("files"), async (req, res) => {
+app.post("/upload-folder", retiredUpload, upload.array("files"), async (req, res) => {
   if (!req.files || req.files.length < 2) {
     return res.status(400).send("Need at least a YAML and DB3 file");
   }
@@ -110,7 +124,7 @@ app.post("/upload-folder", upload.array("files"), async (req, res) => {
 
 const csv = require("csv-parser");
 
-app.post("/upload-csv", upload.single("file"), async (req, res) => {
+app.post("/upload-csv", retiredUpload, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).send("No CSV file uploaded");
 
   if (!req.file.originalname.toLowerCase().endsWith(".csv")) {
@@ -178,6 +192,14 @@ process.on("unhandledRejection", (reason) =>
 
 // GET /api/rosbags
 app.get("/api/rosbags", async (req, res) => {
+  if (evil.enabled) {
+    try {
+      return res.json(await evil.listBags());
+    } catch (err) {
+      console.error("EVIL list failed:", err.message);
+      return res.status(502).json({ error: `EVIL is unreachable: ${err.message}` });
+    }
+  }
   try {
     const result = await pool.query(
       "SELECT folder_name FROM rosbags ORDER BY created_at DESC"
@@ -190,7 +212,7 @@ app.get("/api/rosbags", async (req, res) => {
 });
 
 // GET /api/rosbags/:folderName
-app.get("/api/rosbags/:folderName", async (req, res) => {
+app.get("/api/rosbags/:folderName", ensureReady(evil, "folderName"), async (req, res) => {
   const { folderName } = req.params;
   const { topic, cursor } = req.query;
   const rawLimit = parseInt(req.query.limit, 10);
@@ -271,7 +293,7 @@ app.get("/api/rosbags/:folderName", async (req, res) => {
 });
 
 // Stream /api/rosbags/:folderName/stream
-app.get("/api/rosbags/:folderName/stream", async (req, res) => {
+app.get("/api/rosbags/:folderName/stream", ensureReady(evil, "folderName"), async (req, res) => {
   const { folderName } = req.params;
   const { topic } = req.query;
   const rawLimit = parseInt(req.query.limit, 10);
@@ -404,6 +426,14 @@ app.get("/api/rosbags/:folderName/stream", async (req, res) => {
 
 // GET /api/csv
 app.get("/api/csv", async (req, res) => {
+  if (evil.enabled) {
+    try {
+      return res.json(await evil.listCsvs());
+    } catch (err) {
+      console.error("EVIL list failed:", err.message);
+      return res.status(502).json({ error: `EVIL is unreachable: ${err.message}` });
+    }
+  }
   try {
     const result = await pool.query(
       "SELECT id, name, uploaded_at FROM csv_uploads ORDER BY uploaded_at DESC"
@@ -416,7 +446,7 @@ app.get("/api/csv", async (req, res) => {
 });
 
 // GET /api/csv/:name
-app.get("/api/csv/:name", async (req, res) => {
+app.get("/api/csv/:name", ensureReady(evil, "name"), async (req, res) => {
   const { name } = req.params;
   try {
     const result = await pool.query(
@@ -433,16 +463,51 @@ app.get("/api/csv/:name", async (req, res) => {
 });
 
 // GET /api/rosbags/:folderName/topics
-app.get("/api/rosbags/:folderName/topics", async (req, res) => {
+app.get("/api/rosbags/:folderName/topics", ensureReady(evil, "folderName"), async (req, res) => {
   const { folderName } = req.params;
   try {
     const result = await pool.query(
       "SELECT DISTINCT topic FROM rosbag_messages WHERE bag_name = $1 ORDER BY topic ASC",
       [folderName]
     );
-    res.json({ topics: result.rows.map((r) => r.topic) });
+    let notDecoded = [];
+    try {
+      const nd = await pool.query(
+        "SELECT topic FROM cache_topics WHERE bag_name = $1 AND decoded = FALSE ORDER BY topic",
+        [folderName]
+      );
+      notDecoded = nd.rows.map((r) => r.topic);
+    } catch (_) {
+      // cache_topics appears with the first cache build; older databases do not have it yet
+    }
+    res.json({ topics: result.rows.map((r) => r.topic), not_decoded: notDecoded });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch topics" });
   }
+});
+
+// ---- recordings from EVIL: prepare (lazy cache build) and cache status ----------------------
+
+// POST /api/rosbags/:id/prepare  (also used for CSVs: the id is the recording id either way)
+app.post("/api/recordings/:id/prepare", async (req, res) => {
+  if (!evil.enabled) return res.status(404).json({ error: "EVIL integration is not configured" });
+  try {
+    res.status(202).json(await evil.prepare(req.params.id));
+  } catch (err) {
+    res.status(err.status === 404 || err.status === 409 ? err.status : 502).json({ error: err.message });
+  }
+});
+
+app.get("/api/recordings/:id/cache", async (req, res) => {
+  if (!evil.enabled) return res.status(404).json({ error: "EVIL integration is not configured" });
+  try {
+    res.json(await evil.cacheState(req.params.id));
+  } catch (err) {
+    res.status(err.status === 404 ? 404 : 502).json({ error: err.message });
+  }
+});
+
+app.get("/api/config", (req, res) => {
+  res.json({ evil: evil.enabled, legacy_upload: legacyUploadAllowed, evil_ui_url: process.env.EVIL_UI_URL || null });
 });

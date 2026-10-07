@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import Select from "react-select";
 import UploadBag from "./UploadBag";
+import { useCatConfig, useRecordingPrep, isReady, PrepareBanner, UploadNotice } from "./cachePrep";
 import PointCloudPlayer from "./PointCloudPlayer";
 import RawDataViewer from "./RawDataViewer";
 
@@ -19,6 +20,8 @@ const DEFAULT_DOWNSAMPLE_PERCENT = parseInt(
 );
 
 export default function DynamicTab() {
+  const config = useCatConfig();
+  const { prep, prepare } = useRecordingPrep(config.evil);
   const [bag, setBag] = useState(null);
   const [bagList, setBagList] = useState(null);
   const [selectedBag, setSelectedBag] = useState(null);
@@ -123,6 +126,7 @@ export default function DynamicTab() {
     }
     setBag(opt.value);
     resetPlayback();
+    prepare(opt.value);
   };
 
   const fetchBagList = useCallback(async () => {
@@ -130,7 +134,7 @@ export default function DynamicTab() {
       const response = await fetch(API_BASE + "/api/rosbags");
       const data = await response.json();
       const options = data.map((bag) => ({
-        label: bag.folder_name,
+        label: bag.label || bag.folder_name,
         value: bag.folder_name,
       }));
       setBagList(options);
@@ -151,8 +155,9 @@ export default function DynamicTab() {
         `${API_BASE}/api/rosbags/${folderName}/topics`
       );
       const data = await response.json();
+      const notDecoded = new Set(data.not_decoded || []);
       const options = (data.topics || []).map((topic) => ({
-        label: topic,
+        label: notDecoded.has(topic) ? `${topic} (not decoded)` : topic,
         value: topic,
       }));
 
@@ -405,8 +410,10 @@ export default function DynamicTab() {
 
   useEffect(() => {
     if (!bag) return;
+    // with EVIL, topics exist only once the recording's cache is built
+    if (!isReady(prep, bag, config.evil)) return;
     fetchTopics(bag);
-  }, [bag]);
+  }, [bag, prep.status, prep.id, config.evil]);
 
   useEffect(() => {
     if (!bufferLimit || JSONList.length <= bufferLimit) return;
@@ -451,7 +458,11 @@ export default function DynamicTab() {
   return (
     <div className="parent">
       <div className="left-pane">
-        <UploadBag onUploadComplete={handleList} loading={handleLoad} />
+        {config.legacy_upload ? (
+          <UploadBag onUploadComplete={handleList} loading={handleLoad} />
+        ) : (
+          <UploadNotice url={config.evil_ui_url} />
+        )}
 
         <Select
           options={bagList || []}
@@ -459,6 +470,7 @@ export default function DynamicTab() {
           isDisabled={isLoading || isStreaming}
           placeholder="Select a ROSBag to visualize"
         />
+        <PrepareBanner prep={prep} />
 
         <Select
           options={topicOptions}
@@ -524,7 +536,7 @@ export default function DynamicTab() {
         <button
           onClick={startStreaming}
           className="button-css"
-          disabled={isLoading || isStreaming}
+          disabled={isLoading || isStreaming || !isReady(prep, bag, config.evil)}
         >
           {isStreaming ? "Streaming…" : "Stream and Visualize"}
         </button>

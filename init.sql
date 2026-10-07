@@ -23,3 +23,15 @@ CREATE TABLE csv_uploads (
     data JSONB NOT NULL,      
     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Phase 4 (CAT as a cache of EVIL's recordings): which topics of a cached bag were stored undecoded
+-- because their message type is not installed in the pyworker. Also created idempotently by
+-- pyworker/cache_sink.py, since an existing database never re-runs this file.
+CREATE TABLE IF NOT EXISTS cache_topics (
+    bag_name TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    type TEXT,
+    msg_count BIGINT,
+    decoded BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY (bag_name, topic)
+);

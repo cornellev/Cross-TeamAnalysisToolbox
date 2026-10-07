@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import subprocess
 import os
+from cache_api import router as cache_router
 from shiny import App as ShinyApp
 from shiny_ev import app as shiny_app
 
@@ -31,5 +32,8 @@ def run_process(folder_name: str):
     except subprocess.CalledProcessError as e:
         return {"error": e.stderr, "stdout": e.stdout}
 
+
+# CAT as a derived cache of EVIL's recordings (build / progress / evict): see cache_api.py
+app.include_router(cache_router)
 
 app.mount("/ev", shiny_app)
