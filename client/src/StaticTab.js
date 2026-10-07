@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import Select from "react-select";
 import UploadCsv from "./UploadCsv";
+import { useCatConfig, useRecordingPrep, isReady, PrepareBanner, UploadNotice } from "./cachePrep";
 
 const API_BASE = (process.env.REACT_APP_API_URL || "").replace(/\/$/, "");
 const EV_URL = `${(process.env.REACT_APP_SHINY_URL || "/ev/").replace(
@@ -11,6 +12,9 @@ const EV_URL = `${(process.env.REACT_APP_SHINY_URL || "/ev/").replace(
 const isAbsoluteUrl = (url) => /^https?:\/\//i.test(url);
 
 export default function StaticTab() {
+  const config = useCatConfig();
+  const csvPrep = useRecordingPrep(config.evil);
+  const bagPrep = useRecordingPrep(config.evil);
   const [csvList, setCsvList] = useState([]);
   const [selectedCsv, setSelectedCsv] = useState(null);
   const [bagList, setBagList] = useState([]);
@@ -28,7 +32,7 @@ export default function StaticTab() {
       const data = await response.json();
       setCsvList(
         data.map((csv) => ({
-          label: csv.name,
+          label: csv.label || csv.name,
           value: csv.name,
         }))
       );
@@ -48,7 +52,7 @@ export default function StaticTab() {
       const data = await response.json();
       setBagList(
         data.map((bag) => ({
-          label: bag.folder_name,
+          label: bag.label || bag.folder_name,
           value: bag.folder_name,
         }))
       );
@@ -64,6 +68,7 @@ export default function StaticTab() {
   useEffect(() => {
     const fetchTopics = async () => {
       if (!selectedBag) return;
+      if (!isReady(bagPrep.prep, selectedBag.value, config.evil)) return;
       try {
         const response = await fetch(
           `${API_BASE}/api/rosbags/${selectedBag.value}/topics`
@@ -76,7 +81,7 @@ export default function StaticTab() {
       }
     };
     fetchTopics();
-  }, [selectedBag]);
+  }, [selectedBag, bagPrep.prep.status, bagPrep.prep.id, config.evil]);
 
   // handle visualize button click
   const handleVisualize = () => {
@@ -192,28 +197,40 @@ export default function StaticTab() {
             CSV Upload & Visualization
           </h3>
 
-          <UploadCsv
-            onUploadComplete={() => {
-              fetchCsvList();
-            }}
-            loading={setIsLoading}
-          />
+          {config.legacy_upload ? (
+            <UploadCsv
+              onUploadComplete={() => {
+                fetchCsvList();
+              }}
+              loading={setIsLoading}
+            />
+          ) : (
+            <UploadNotice url={config.evil_ui_url} />
+          )}
 
           <Select
             options={csvList}
             value={selectedCsv}
-            onChange={setSelectedCsv}
+            onChange={(opt) => {
+              setSelectedCsv(opt);
+              csvPrep.prepare(opt ? opt.value : null);
+            }}
             isDisabled={isLoading}
             placeholder="Select a CSV file"
             styles={{
               container: (base) => ({ ...base, marginTop: "10px" }),
             }}
           />
+          <PrepareBanner prep={csvPrep.prep} />
 
           <button
             onClick={handleVisualize}
             className="button-css"
-            disabled={!selectedCsv || isLoading}
+            disabled={
+              !selectedCsv ||
+              isLoading ||
+              !isReady(csvPrep.prep, selectedCsv && selectedCsv.value, config.evil)
+            }
           >
             {isLoading ? "Loading..." : "Fetch & Visualize CSV"}
           </button>
@@ -226,10 +243,16 @@ export default function StaticTab() {
           <Select
             options={bagList}
             value={selectedBag}
-            onChange={setSelectedBag}
+            onChange={(opt) => {
+              setSelectedBag(opt);
+              setSelectedTopic(null);
+              setTopics([]);
+              bagPrep.prepare(opt ? opt.value : null);
+            }}
             isDisabled={isLoading}
             placeholder="Select a ROSBag"
           />
+          <PrepareBanner prep={bagPrep.prep} />
 
           <Select
             options={topics}

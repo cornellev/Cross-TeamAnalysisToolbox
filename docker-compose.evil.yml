@@ -1,0 +1,38 @@
+# CAT as a derived cache of EVIL's recordings (EVIL: recording-catalog-design.md, Phase 4).
+#
+# Layer this over the normal compose file; either pass both -f files, or put
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.evil.yml
+# in .env (the systemd unit then picks it up too):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.evil.yml up -d --build
+#
+# What it does:
+#  - the pyworker mounts EVIL's data volume READ-ONLY (it reads the raw files EVIL stored; it never
+#    writes there), and gets /ros_ws/extra for extra message packages (see scripts/build_msg_package.sh);
+#  - the Node server lists recordings from EVIL, asks it to build a recording's cache on first open, and
+#    retires CAT's own upload (set CAT_LEGACY_UPLOAD=1 to keep it);
+#  - nothing else changes: the React client, the Shiny app and CAT's Postgres keep their shapes.
+#
+# Needs EVIL's `upload` service reachable from this stack. Containers cannot use 127.0.0.1 for another
+# compose project: use the host's tailnet IP (or LAN IP), e.g. EVIL_UPLOAD_URL=http://100.122.165.58:8766
+# in .env. EVIL's worker must be told where THIS pyworker is (EVIL_CAT_PYWORKER_URL=http://<host>:8000).
+
+services:
+  server:
+    environment:
+      - EVIL_UPLOAD_URL=${EVIL_UPLOAD_URL:?set EVIL_UPLOAD_URL (EVIL upload service, e.g. http://100.122.165.58:8766)}
+      - EVIL_UI_URL=${EVIL_UI_URL:-}
+      - CAT_LEGACY_UPLOAD=${CAT_LEGACY_UPLOAD:-0}
+
+  pyworker:
+    environment:
+      - EVIL_RAW_ROOT=/evil-data/raw
+      - EXTRA_MSG_ROOT=/ros_ws/extra
+    volumes:
+      - evil-data:/evil-data:ro
+      - ./msg_packages:/ros_ws/extra
+
+volumes:
+  evil-data:
+    external: true
+    name: ${EVIL_DATA_VOLUME:-evil_evil-data}
